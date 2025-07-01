@@ -212,3 +212,83 @@ class SparseFeatureDataset(
                 n_samples_needed = batch_size - len(batch)
                 buffer_size = int(n_samples_needed * buffer_ratio)
         return batch
+
+
+# Add to the existing file, after SparseFeatureDataset:
+
+class SkipTrigramDataset(Dataset[Int[Tensor, "batch seq_len"]]):
+    """Dataset for skip-trigram language modeling task.
+    
+    Generates sequences where:
+    - Tokens 0-10: noise tokens (no predictive power, next token is random)
+    - Tokens 11+: signal tokens that form skip trigrams
+    - Each sequence contains exactly one skip trigram pattern: trigger1 _ trigger2 target
+    """
+    
+    def __init__(
+        self,
+        vocab_size: int,
+        seq_len: int,
+        num_trigrams: int = 10,
+        device: str = "cpu",
+    ):
+        self.vocab_size = vocab_size
+        self.seq_len = seq_len
+        self.num_trigrams = num_trigrams
+        self.device = device
+        
+        # Split vocab: 0-10 are noise tokens, 11+ are signal tokens
+        self.noise_tokens = list(range(11))  # 0-10
+        self.signal_tokens = list(range(11, vocab_size))  # 11+
+        
+        if len(self.signal_tokens) < 2:
+            raise ValueError(f"Need at least 2 signal tokens (vocab_size >= 13), got {vocab_size}")
+        
+        # Generate random skip trigrams: signal_token1 -> signal_token2 -> target_noise_token
+        self.trigrams = []
+        for _ in range(num_trigrams):
+            # Pick two different signal tokens
+            trigger_indices = torch.randperm(len(self.signal_tokens))[:2]
+            trigger1 = self.signal_tokens[trigger_indices[0].item()]
+            trigger2 = self.signal_tokens[trigger_indices[1].item()]
+            
+            # Pick a noise token as the target
+            target_idx = torch.randint(0, len(self.noise_tokens), (1,)).item()
+            target = self.noise_tokens[target_idx]
+            
+            self.trigrams.append((trigger1, trigger2, target))
+        
+        print(f"Generated {len(self.trigrams)} skip trigrams: {self.trigrams}")
+    
+    def __len__(self) -> int:
+        return 2**31  # Infinite dataset like SparseFeatureDataset
+    
+    def generate_batch(self, batch_size: int) -> Int[Tensor, "batch seq_len"]:
+        """Generate a batch of sequences, each containing exactly one skip trigram."""
+        
+        batch = torch.randint(0, self.vocab_size, (batch_size, self.seq_len), device=self.device)
+        
+        if len(self.trigrams) > 0 and self.seq_len >= 4:
+            for i in range(batch_size):
+                # Pick a random trigram for this sequence
+                trigram_idx = torch.randint(0, len(self.trigrams), (1,)).item()
+                trigger1, trigger2, target = self.trigrams[trigram_idx]
+                
+                # Find a valid position for the pattern (trigger1, gap, trigger2, target)
+                # Need positions j, j+2, j+3 to be valid
+                max_start = self.seq_len - 4
+                if max_start >= 0:
+                    start_pos = torch.randint(0, max_start + 1, (1,)).item()
+                    
+                    # Insert the pattern: trigger1 at start_pos, trigger2 at start_pos+2, target at start_pos+3
+                    batch[i, start_pos] = trigger1
+                    batch[i, start_pos + 2] = trigger2  
+                    batch[i, start_pos + 3] = target
+                    
+                    # The position at start_pos+1 stays random (the "skip")
+        
+        return batch
+    
+    def __getitem__(self, idx: int) -> Int[Tensor, "seq_len"]:
+        """Generate a single sequence (for compatibility, but we mainly use generate_batch)."""
+        return self.generate_batch(1)[0]

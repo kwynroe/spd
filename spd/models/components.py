@@ -157,3 +157,69 @@ class EmbeddingComponent(nn.Module):
             component_acts, self.B, "batch pos C, ... C embedding_dim -> batch pos embedding_dim"
         )
         return out
+
+
+.
+
+class AttentionComponent(nn.Module): 
+    def __init__(
+        self, 
+        d_model: int,
+        C: int,
+        bias: Tensor | None = None,
+        causal_mask: bool = True,
+        attn_scores_normed: bool = True
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.attn_scores_norm = self.d_model if attn_scores_normed else 1.0
+        self.C = C
+        self.use_causal_mask = causal_mask
+        self.A = nn.Parameter(torch.empty(d_model, C))
+        self.B = nn.Parameter(torch.empty(C, d_model))
+        self.bias = bias
+        self.is_attention_module = True
+
+        init_param_(self.A, fan_val=d_model, nonlinearity="linear")
+        init_param_(self.B, fan_val=C, nonlinearity="linear")
+
+        # For masked forward passes
+        self.mask: Float[Tensor, "... C"] | None = None
+
+    @property
+    def weight(self) -> Float[Tensor, "d_model d_model"]:
+        """B^T @ A^T"""
+        return einops.einsum(self.A, self.B, "d_model C, C d_model -> d_model d_model")
+    
+    def causal_mask(self, scores: Float[Tensor, "batch seq1 seq2"]) -> Float[Tensor, "batch seq1 seq2"]:
+        """Apply a causal mask to the attention scores."""
+        batch, seq_len, _ = scores.shape
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=scores.device), diagonal=1).bool()
+        return scores.masked_fill(causal_mask, float('-inf'))
+    def forward(self, x: Float[Tensor, "batch seq d_model"]) -> Float[Tensor, "batch seq seq"]:
+        """Forward pass through A and B matrices.
+
+        Args:
+            x: Input tensor [batch, seq, d_model]
+        Returns:
+            Attention scores [batch, seq, seq]
+        """
+        if self.mask is not None:
+            masked_A = self.A * self.mask.unsqueeze(0)
+            masked_B = self.B * self.mask.unsqueeze(-1)
+        else:
+            masked_A = self.A
+            masked_B = self.B
+        
+        # Construct QK^T from masked components
+        QK_T = einops.einsum(masked_A, masked_B, "d_model C, C d_model -> d_model d_model")
+        
+        # Compute attention scores: x @ QK^T @ x^T
+        scores = einops.einsum(x, QK_T, x, "batch seq1 d_model, d_model d_model, batch seq2 d_model -> batch seq1 seq2")/self.attn_scores_norm
+
+        # Apply causal mask if needed
+        if self.use_causal_mask:
+            scores = self.causal_mask(scores)
+        
+        pattern = scores.softmax(dim=-1)
+        return pattern

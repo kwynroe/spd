@@ -10,7 +10,7 @@ from torch import Tensor
 from spd.configs import Config
 from spd.models.component_model import ComponentModel
 from spd.models.component_utils import calc_stochastic_masks
-from spd.models.components import EmbeddingComponent, LinearComponent
+from spd.models.components import EmbeddingComponent, LinearComponent, AttentionComponent
 from spd.utils import calc_kl_divergence_lm
 
 
@@ -64,7 +64,7 @@ def calc_embedding_recon_loss(
 def calc_schatten_loss(
     ci_upper_leaky: dict[str, Float[Tensor, "... C"]],
     pnorm: float,
-    components: dict[str, LinearComponent | EmbeddingComponent],
+    components: dict[str, LinearComponent | EmbeddingComponent | AttentionComponent],
     device: str,
 ) -> Float[Tensor, ""]:
     """Calculate the Schatten loss on the active components.
@@ -126,10 +126,10 @@ def calc_masked_recon_layerwise_loss(
     model: ComponentModel,
     batch: Int[Tensor, "..."],
     device: str,
-    components: dict[str, LinearComponent | EmbeddingComponent],
+    components: dict[str, LinearComponent | EmbeddingComponent | AttentionComponent],
     masks: list[dict[str, Float[Tensor, "... C"]]],
     target_out: Float[Tensor, "... d_model_out"],
-    loss_type: Literal["mse", "kl"] = "kl",
+    loss_type: Literal["mse", "kl", "attn"] = "kl",
 ) -> Float[Tensor, ""]:
     """Calculate the recon loss when augmenting the model one (masked) component at a time."""
     total_loss = torch.tensor(0.0, device=device)
@@ -143,7 +143,11 @@ def calc_masked_recon_layerwise_loss(
             if loss_type == "mse":
                 loss = ((modified_out - target_out) ** 2).mean()
             elif loss_type == "kl":
-                loss = calc_kl_divergence_lm(pred=modified_out, target=target_out)
+                loss = calc_kl_divergence_lm(pred=modified_out, target=target_out, pre_softmax=False)
+            elif loss_type == "attn":
+                if not component.is_attention_module:
+                    raise ValueError(f"Component {component_name} is not an attention module.")
+                loss = calc_kl_divergence_lm(pred, modified_out, target=target_out, pre_softmax=True)
             else:
                 raise ValueError(f"Invalid loss type: {loss_type}")
             total_loss += loss
@@ -154,10 +158,10 @@ def calc_masked_recon_layerwise_loss(
 def calc_masked_recon_loss(
     model: ComponentModel,
     batch: Float[Tensor, "... d_in"],
-    components: dict[str, LinearComponent | EmbeddingComponent],
+    components: dict[str, LinearComponent | EmbeddingComponent | AttentionComponent],
     masks: dict[str, Float[Tensor, "... C"]],
     target_out: Float[Tensor, "... d_mdoel_out"],
-    loss_type: Literal["mse", "kl"] = "mse",
+    loss_type: Literal["mse", "kl", "attn"] = "mse",
 ) -> Float[Tensor, ""]:
     """Calculate the MSE over all masks."""
     # Do a forward pass with all components
@@ -166,6 +170,10 @@ def calc_masked_recon_loss(
         loss = ((out - target_out) ** 2).mean()
     elif loss_type == "kl":
         loss = calc_kl_divergence_lm(pred=out, target=target_out)
+    elif loss_type == "attn":
+        if not component.is_attention_module:
+            raise ValueError(f"Component {component_name} is not an attention module.")
+        loss = calc_kl_divergence_lm(pred, modified_out, target=target_out, pre_softmax=True)
     else:
         raise ValueError(f"Invalid loss type: {loss_type}")
     return loss
@@ -194,7 +202,7 @@ def _calc_tensors_mse(
 
 
 def calc_faithfulness_loss(
-    components: dict[str, LinearComponent | EmbeddingComponent],
+    components: dict[str, LinearComponent | EmbeddingComponent | AttentionComponent],
     target_model: nn.Module,
     n_params: int,
     device: str,
@@ -222,7 +230,7 @@ def calc_faithfulness_loss(
 def calc_ce_losses(
     model: ComponentModel,
     batch: Int[Tensor, "..."],
-    components: dict[str, LinearComponent | EmbeddingComponent],
+    components: dict[str, LinearComponent | EmbeddingComponent | AttentionComponent],
     masks: dict[str, Float[Tensor, "..."]],
     unmasked_component_logits: Float[Tensor, "..."],
     masked_component_logits: Float[Tensor, "..."],
@@ -284,7 +292,7 @@ def calculate_losses(
     model: ComponentModel,
     batch: Int[Tensor, "..."],
     config: Config,
-    components: dict[str, LinearComponent | EmbeddingComponent],
+    components: dict[str, LinearComponent | EmbeddingComponent | AttentionComponent],
     causal_importances: dict[str, Float[Tensor, "batch C"]],
     causal_importances_upper_leaky: dict[str, Float[Tensor, "batch C"]],
     target_out: Tensor,

@@ -164,7 +164,7 @@ class Config(BaseModel):
         ...,
         description="The p-value used for the importance minimality loss",
     )
-    output_loss_type: Literal["mse", "kl"] = Field(
+    output_loss_type: Literal["mse", "kl", "attn"] = Field(
         ...,
         description="Metric used to measure recon error between model outputs and targets",
     )

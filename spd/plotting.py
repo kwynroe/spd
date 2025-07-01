@@ -14,7 +14,7 @@ from torch import Tensor
 
 from spd.models.component_model import ComponentModel
 from spd.models.component_utils import calc_causal_importances
-from spd.models.components import EmbeddingComponent, Gate, GateMLP, LinearComponent
+from spd.models.components import EmbeddingComponent, Gate, GateMLP, LinearComponent, AttentionComponent
 
 
 def permute_to_identity(
@@ -131,7 +131,7 @@ def _plot_causal_importances_figure(
 
 def plot_causal_importance_vals(
     model: ComponentModel,
-    components: Mapping[str, LinearComponent | EmbeddingComponent],
+    components: Mapping[str, LinearComponent | EmbeddingComponent | AttentionComponent],
     gates: Mapping[str, Gate | GateMLP],
     batch_shape: tuple[int, ...],
     device: str | torch.device,
@@ -284,7 +284,7 @@ def plot_matrix(
 
 
 def plot_AB_matrices(
-    components: dict[str, LinearComponent | EmbeddingComponent],
+    components: dict[str, LinearComponent | EmbeddingComponent | AttentionComponent],
     all_perm_indices: dict[str, Float[Tensor, " C"]] | None = None,
 ) -> plt.Figure:
     """Plot A and B matrices for each instance, grouped by layer."""
@@ -440,7 +440,7 @@ def plot_ci_histograms(
 
 def create_toy_model_plot_results(
     model: ComponentModel,
-    components: dict[str, LinearComponent | EmbeddingComponent],
+    components: dict[str, LinearComponent | EmbeddingComponent | AttentionComponent],
     gates: dict[str, Gate | GateMLP],
     batch_shape: tuple[int, ...],
     device: str | torch.device,

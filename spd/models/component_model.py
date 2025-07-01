@@ -14,7 +14,7 @@ from torch import Tensor, nn
 from wandb.apis.public import Run
 
 from spd.configs import Config
-from spd.models.components import EmbeddingComponent, Gate, GateMLP, LinearComponent
+from spd.models.components import EmbeddingComponent, Gate, GateMLP, LinearComponent, AttentionComponent
 from spd.spd_types import WANDB_PATH_PREFIX, ModelPath
 from spd.utils import load_pretrained
 from spd.wandb_utils import download_wandb_file, fetch_latest_wandb_checkpoint, fetch_wandb_run_dir
@@ -53,7 +53,7 @@ class ComponentModel(nn.Module):
 
     def create_target_components(self, target_module_patterns: list[str], C: int) -> nn.ModuleDict:
         """Create target components for the model."""
-        components: dict[str, LinearComponent | EmbeddingComponent] = {}
+        components: dict[str, LinearComponent | EmbeddingComponent | AttentionComponent] = {}
         matched_patterns: set[str] = set()
 
         for name, module in self.model.named_modules():
@@ -71,6 +71,13 @@ class ComponentModel(nn.Module):
                             vocab_size=module.num_embeddings,
                             embedding_dim=module.embedding_dim,
                             C=C,
+                        )
+                    elif hasattr(module, 'is_attention_module'):  # Custom flag for attention modules
+                        components[name] = AttentionComponent(
+                            d_model=module.d_model, 
+                            C=C,
+                            causal_mask=getattr(module, 'causal_mask', True),
+                            attn_scores_normed=getattr(module, 'attn_scores_normed', True),
                         )
                     else:
                         raise ValueError(
@@ -116,7 +123,7 @@ class ComponentModel(nn.Module):
     @contextmanager
     def _replaced_modules(
         self,
-        components: Mapping[str, LinearComponent | EmbeddingComponent],
+        components: Mapping[str, LinearComponent | EmbeddingComponent | AttentionComponent],
         masks: dict[str, Float[Tensor, "... C"]] | None = None,
     ):
         """Context manager for temporarily replacing modules with components.
@@ -155,7 +162,7 @@ class ComponentModel(nn.Module):
     def forward_with_components(
         self,
         *args: Any,
-        components: dict[str, LinearComponent | EmbeddingComponent],
+        components: dict[str, Linear | EmbeddingComponent | AttentionComponent],
         masks: dict[str, Float[Tensor, "... C"]] | None = None,
         **kwargs: Any,
     ) -> Any:
@@ -270,7 +277,7 @@ class ComponentModel(nn.Module):
 
 
 def init_As_and_Bs_(
-    model: ComponentModel, components: dict[str, LinearComponent | EmbeddingComponent]
+    model: ComponentModel, components: dict[str, LinearComponent | EmbeddingComponent | AttentionComponent]
 ) -> None:
     """Initialize the A and B matrices.
     1. Normalize every component to 1.

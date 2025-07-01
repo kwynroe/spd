@@ -25,7 +25,7 @@ from spd.models.component_utils import (
     calc_ci_l_zero,
     component_activation_statistics,
 )
-from spd.models.components import EmbeddingComponent, Gate, GateMLP, LinearComponent
+from spd.models.components import EmbeddingComponent, Gate, GateMLP, LinearComponent, AttentionComponent
 from spd.plotting import (
     create_embed_ci_sample_table,
     plot_ci_histograms,
@@ -91,7 +91,7 @@ def optimize(
     gates: dict[str, Gate | GateMLP] = {
         k.removeprefix("gates.").replace("-", "."): v for k, v in model.gates.items()
     }  # type: ignore
-    components: dict[str, LinearComponent | EmbeddingComponent] = {
+    components: dict[str, LinearComponent | EmbeddingComponent | AttentionComponent] = {
         k.removeprefix("components.").replace("-", "."): v for k, v in model.components.items()
     }  # type: ignore
 
@@ -202,14 +202,20 @@ def optimize(
                 )
 
                 target_logits = model(batch)
-
-                log_data["misc/unmasked_kl_loss_vs_target"] = calc_kl_divergence_lm(
-                    pred=unmasked_component_logits, target=target_logits
-                ).item()
-                log_data["misc/masked_kl_loss_vs_target"] = calc_kl_divergence_lm(
-                    pred=masked_component_logits, target=target_logits
-                ).item()
-
+                if config.output_loss_type == "attn":
+                    log_data["misc/unmasked_kl_loss_vs_target"] = calc_kl_divergence_lm(
+                        pred=unmasked_component_logits, target=target_logits, pre_softmax=True
+                    ).item()
+                    log_data["misc/masked_kl_loss_vs_target"] = calc_kl_divergence_lm(
+                        pred=masked_component_logits, target=target_logits, pre_softmax=True
+                    ).item()
+                else:
+                    log_data["misc/unmasked_kl_loss_vs_target"] = calc_kl_divergence_lm(
+                        pred=unmasked_component_logits, target=target_logits, pre_softmax=False
+                    ).item()
+                    log_data["misc/masked_kl_loss_vs_target"] = calc_kl_divergence_lm(
+                        pred=masked_component_logits, target=target_logits, pre_softmax=False
+                    ).item()
                 if config.log_ce_losses:
                     ce_losses = calc_ce_losses(
                         model=model,

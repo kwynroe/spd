@@ -254,10 +254,15 @@ def extract_batch_data(
 def calc_kl_divergence_lm(
     pred: Float[Tensor, "... vocab"],
     target: Float[Tensor, "... vocab"],
+    pre_softmax: bool = True,
 ) -> Float[Tensor, ""]:
     """Calculate the KL divergence between two logits."""
     assert pred.shape == target.shape
-    log_q = torch.log_softmax(pred, dim=-1)  # log Q
-    p = torch.softmax(target, dim=-1)  # P
+    if pre_softmax:
+        log_q = pred
+        p = target
+    else:
+        log_q = torch.log_softmax(pred, dim=-1)  # log Q
+        p = torch.softmax(target, dim=-1)  # P
     kl = F.kl_div(log_q, p, reduction="none")  # P · (log P − log Q)
     return kl.sum(dim=-1).mean()  # Σ_vocab / (batch·seq)

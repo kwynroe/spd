@@ -1,0 +1,15 @@
+attention_model_config:
+  attn_scores_normed: true
+  causal_mask: true
+  d_model: 10
+  seq_len: 8
+  vocab_size: 20
+batch_size: 4096
+data_type: random
+lr: 0.005
+lr_schedule: constant
+num_trigrams: 20
+seed: 0
+steps: 2000
+wandb_entity: kwyn390
+wandb_project: attn_toy

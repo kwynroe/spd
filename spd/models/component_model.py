@@ -7,6 +7,7 @@ from typing import Any
 
 import einops
 import torch
+import torch.nn as nn
 import wandb
 import yaml
 from jaxtyping import Float
@@ -51,7 +52,7 @@ class ComponentModel(nn.Module):
 
         self.gates = nn.ModuleDict({name: gate_class(**gate_kwargs) for name in self.components})
 
-    def create_target_components(self, target_module_patterns: list[str], C: int) -> nn.ModuleDict:
+    def create_target_components(self, target_module_patterns: list[str], C) -> nn.ModuleDict:
         """Create target components for the model."""
         components: dict[str, LinearComponent | EmbeddingComponent | AttentionComponent] = {}
         matched_patterns: set[str] = set()
@@ -78,6 +79,8 @@ class ComponentModel(nn.Module):
                             C=C,
                             causal_mask=getattr(module, 'causal_mask', True),
                             attn_scores_normed=getattr(module, 'attn_scores_normed', True),
+                            ov = module.OV
+                            
                         )
                     else:
                         raise ValueError(
@@ -162,7 +165,7 @@ class ComponentModel(nn.Module):
     def forward_with_components(
         self,
         *args: Any,
-        components: dict[str, Linear | EmbeddingComponent | AttentionComponent],
+        components: dict[str, LinearComponent | EmbeddingComponent | AttentionComponent],
         masks: dict[str, Float[Tensor, "... C"]] | None = None,
         **kwargs: Any,
     ) -> Any:

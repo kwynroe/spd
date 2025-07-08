@@ -1,3 +1,4 @@
+#type:ignore
 import einops
 import torch
 from jaxtyping import Float
@@ -159,13 +160,14 @@ class EmbeddingComponent(nn.Module):
         return out
 
 
-.
+
 
 class AttentionComponent(nn.Module): 
     def __init__(
         self, 
         d_model: int,
         C: int,
+        ov: Tensor | None = None,
         bias: Tensor | None = None,
         causal_mask: bool = True,
         attn_scores_normed: bool = True
@@ -177,6 +179,7 @@ class AttentionComponent(nn.Module):
         self.use_causal_mask = causal_mask
         self.A = nn.Parameter(torch.empty(d_model, C))
         self.B = nn.Parameter(torch.empty(C, d_model))
+        self.ov = ov.clone().detach()
         self.bias = bias
         self.is_attention_module = True
 
@@ -189,37 +192,45 @@ class AttentionComponent(nn.Module):
     @property
     def weight(self) -> Float[Tensor, "d_model d_model"]:
         """B^T @ A^T"""
-        return einops.einsum(self.A, self.B, "d_model C, C d_model -> d_model d_model")
+        return einops.einsum(self.A, self.B, "d_modelQ C, C d_modelK -> d_modelQ d_modelK")
     
     def causal_mask(self, scores: Float[Tensor, "batch seq1 seq2"]) -> Float[Tensor, "batch seq1 seq2"]:
         """Apply a causal mask to the attention scores."""
         batch, seq_len, _ = scores.shape
         causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=scores.device), diagonal=1).bool()
         return scores.masked_fill(causal_mask, float('-inf'))
+    
     def forward(self, x: Float[Tensor, "batch seq d_model"]) -> Float[Tensor, "batch seq seq"]:
-        """Forward pass through A and B matrices.
-
-        Args:
-            x: Input tensor [batch, seq, d_model]
-        Returns:
-            Attention scores [batch, seq, seq]
-        """
+        # Compute component activations (this part is correct)
+        query_acts = einops.einsum(x, self.A, "batch seq d_model, d_model C -> batch seq C")
+        key_acts = einops.einsum(x, self.B, "batch seq d_model, C d_model -> batch seq C")
+        component_acts = einops.einsum(query_acts, key_acts, "batch seqQ C, batch seqK C -> batch seqQ seqK C")
+        LR: 0.001000
+        if torch.isnan(query_acts).any():
+            print("NaN in query_acts!")
+        if torch.isnan(key_acts).any():
+            print("NaN in key_acts!")
+        if torch.isnan(component_acts).any():
+            print("NaN in component_acts!")
+    
+        # Apply mask to component activations (query-centric)
         if self.mask is not None:
-            masked_A = self.A * self.mask.unsqueeze(0)
-            masked_B = self.B * self.mask.unsqueeze(-1)
+            # mask shape: [batch, seq, C] -> [batch, seq, 1, C] to broadcast over keys
+            masked_component_acts = component_acts * self.mask.unsqueeze(2)
         else:
-            masked_A = self.A
-            masked_B = self.B
+            masked_component_acts = component_acts
         
-        # Construct QK^T from masked components
-        QK_T = einops.einsum(masked_A, masked_B, "d_model C, C d_model -> d_model d_model")
+        # Sum over components to get final attention scores
+        scores = masked_component_acts.sum(dim=-1) / self.attn_scores_norm  # [batch, seqQ, seqK]
         
-        # Compute attention scores: x @ QK^T @ x^T
-        scores = einops.einsum(x, QK_T, x, "batch seq1 d_model, d_model d_model, batch seq2 d_model -> batch seq1 seq2")/self.attn_scores_norm
-
         # Apply causal mask if needed
         if self.use_causal_mask:
             scores = self.causal_mask(scores)
         
-        pattern = scores.softmax(dim=-1)
-        return pattern
+        if torch.isnan(query_acts).any():
+            print("NaN in scores!")
+        
+        patt = scores.softmax(dim=-1)
+        z = einops.einsum(patt, x, "batch seq1 seq2, batch seq2 d_model -> batch seq1 d_model")
+        out = einops.einsum(z, self.ov, "batch seq d_model, d_model d_model -> batch seq d_model")
+        return out

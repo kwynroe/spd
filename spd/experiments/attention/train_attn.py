@@ -19,11 +19,17 @@ from spd.experiments.attention.models import SingleHeadAttentionModel, AttnModel
 from spd.data_utils import DatasetGeneratedDataLoader, SkipTrigramDataset
 wandb.require("core")
 
+def check_gradients(model):
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            grad_norm = param.grad.norm().item()
+            print(f"{name}: grad_norm={grad_norm:.6f}")
+        else:
+            print(f"{name}: NO GRADIENT")
 
 class AttnTrainConfig(BaseModel):
     """Configuration for training the attention model."""
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    
+    wandb_entity: str | None = None
     wandb_project: str | None = None
     attention_model_config: AttnModelConfig
     batch_size: PositiveInt = 32
@@ -33,6 +39,7 @@ class AttnTrainConfig(BaseModel):
     lr_schedule: Literal["linear", "cosine", "constant"] = "constant"
     # Data generation parameters
     data_type: Literal["random", "copying", "next_token"] = "random"
+    n_trigrams: PositiveInt = 32  # Number of trigrams to generate for the dataset
 
 def linear_lr(step: int, steps: int) -> float:
     return 1 - (step / steps)
@@ -57,7 +64,6 @@ def train(
 ) -> None:
     """Train the attention model on language modeling task."""
     
-  
     if lr_schedule == "linear":
         lr_schedule_fn = linear_lr  
     elif lr_schedule == "cosine":
@@ -78,34 +84,47 @@ def train(
                 
             opt.zero_grad(set_to_none=True)
             
-            # Get batch - format depends on data_utils implementation
-            batch = next(data_iter)  # Assuming [batch, seq] token indices
+            # Get batch with targets for skip-trigram task
+            sequences, targets = dataloader.dataset.generate_batch_with_targets(dataloader.batch_size)
             
             # Forward pass
-            logits = model(batch)  # [batch, seq, vocab_size]
+            logits = model(sequences)  # [batch, seq, vocab_size]
             
-            # Language modeling loss (next token prediction)
-            # Shift targets: predict token i+1 from tokens 0:i
-            targets = batch[:, 1:]  # [batch, seq-1]
-            pred_logits = logits[:, :-1]  # [batch, seq-1, vocab_size]
+            # Skip-trigram loss: only predict the target token after the final position
+            # We want to predict what comes after the trigger2 (which is at position -1)
+            final_logits = logits[:, -1, :]  # [batch, vocab_size] - logits for final position
             
             loss = torch.nn.functional.cross_entropy(
-                pred_logits.reshape(-1, pred_logits.size(-1)),
-                targets.reshape(-1),
-                ignore_index=-1  # If we have padding tokens
+                final_logits,  # [batch, vocab_size]
+                targets,       # [batch] - the target tokens
             )
             
             loss.backward()
             opt.step()
-
+            if step % 100 == 0:  # Check every 100 steps
+                check_gradients(model)
+            # Add this debugging code in your train function after getting sequences and targets
+            if step % 100 == 0:
+                print(f"\nStep {step} debugging:")
+                print(f"Sequences shape: {sequences.shape}")
+                print(f"Targets shape: {targets.shape}")
+                print(f"Sample sequence: {sequences[0].cpu().numpy()}")
+                print(f"Sample target: {targets[0].item()}")
+                print(f"Last token in sequence: {sequences[0, -1].item()}")
+                print(f"Logits shape: {logits.shape}")
+                print(f"Final logits shape: {final_logits.shape}")
+                print(f"Loss: {loss.item()}")
+                
+                # Check if we're actually predicting the right thing
+                predicted_token = final_logits[0].argmax().item()
+                print(f"Predicted token: {predicted_token}, Target: {targets[0].item()}")
             if step % print_freq == 0 or (step + 1 == steps):
                 tqdm.write(f"Step {step} Loss: {loss.item()}")
                 t.set_postfix(loss=loss.item(), lr=step_lr)
                 if log_wandb:
                     wandb.log({"loss": loss.item(), "lr": step_lr}, step=step)
-
-
-
+                    
+                    
 # Then replace the get_model_and_dataloader function:
 def get_model_and_dataloader(
     config: AttnTrainConfig, device: str
@@ -118,7 +137,6 @@ def get_model_and_dataloader(
     dataset = SkipTrigramDataset(
         vocab_size=config.attention_model_config.vocab_size,
         seq_len=config.attention_model_config.seq_len,
-        num_trigrams=5,  # You can make this configurable later
         device=device,
     )
     
@@ -139,11 +157,11 @@ def run_train(config: AttnTrainConfig, device: str) -> None:
     )
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-    out_dir = Path(__file__).parent / "out" / f"{run_name}_{timestamp}"
+    out_dir = Path(__file__).parent / "toy_out" / f"{run_name}_{timestamp}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if config.wandb_project:
-        wandb.init(project=config.wandb_project, name=run_name)
+        wandb.init(entity = config.wandb_entity, project=config.wandb_project, name=run_name)
 
     # Save config
     config_path = out_dir / "attention_train_config.yaml"

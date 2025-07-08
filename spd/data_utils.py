@@ -5,6 +5,8 @@ import torch
 from jaxtyping import Float
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
+from jaxtyping import Int
+
 
 Q = TypeVar("Q")
 
@@ -215,79 +217,128 @@ class SparseFeatureDataset(
 
 
 # Add to the existing file, after SparseFeatureDataset:
-
 class SkipTrigramDataset(Dataset[Int[Tensor, "batch seq_len"]]):
-    """Dataset for skip-trigram language modeling task.
-    
-    Generates sequences where:
-    - Tokens 0-10: noise tokens (no predictive power, next token is random)
-    - Tokens 11+: signal tokens that form skip trigrams
-    - Each sequence contains exactly one skip trigram pattern: trigger1 _ trigger2 target
-    """
-    
     def __init__(
         self,
         vocab_size: int,
         seq_len: int,
-        num_trigrams: int = 10,
         device: str = "cpu",
+        n_trigrams: int = 32,
+        allow_reflexive: bool = True,
     ):
         self.vocab_size = vocab_size
         self.seq_len = seq_len
-        self.num_trigrams = num_trigrams
         self.device = device
+        self.n_trigrams = n_trigrams
+        self.allow_reflexive = allow_reflexive
         
-        # Split vocab: 0-10 are noise tokens, 11+ are signal tokens
-        self.noise_tokens = list(range(11))  # 0-10
-        self.signal_tokens = list(range(11, vocab_size))  # 11+
-        
-        if len(self.signal_tokens) < 2:
-            raise ValueError(f"Need at least 2 signal tokens (vocab_size >= 13), got {vocab_size}")
-        
-        # Generate random skip trigrams: signal_token1 -> signal_token2 -> target_noise_token
-        self.trigrams = []
-        for _ in range(num_trigrams):
-            # Pick two different signal tokens
-            trigger_indices = torch.randperm(len(self.signal_tokens))[:2]
-            trigger1 = self.signal_tokens[trigger_indices[0].item()]
-            trigger2 = self.signal_tokens[trigger_indices[1].item()]
+        # Calculate maximum possible trigrams
+        if allow_reflexive:
+            max_possible_pairs = vocab_size * vocab_size
+        else:
+            max_possible_pairs = vocab_size * (vocab_size - 1)
             
-            # Pick a noise token as the target
-            target_idx = torch.randint(0, len(self.noise_tokens), (1,)).item()
-            target = self.noise_tokens[target_idx]
-            
-            self.trigrams.append((trigger1, trigger2, target))
+        if n_trigrams > max_possible_pairs:
+            raise ValueError(f"Cannot generate {n_trigrams} trigrams with vocab_size={vocab_size}. "
+                           f"Maximum possible: {max_possible_pairs}")
         
-        print(f"Generated {len(self.trigrams)} skip trigrams: {self.trigrams}")
+        if seq_len < 3:
+            raise ValueError(f"Sequence length must be at least 3 for skip trigrams, got {seq_len}")
+        
+        # Generate all possible (first, second) pairs
+        all_pairs = []
+        for first in range(vocab_size):
+            for second in range(vocab_size):
+                if allow_reflexive or first != second:
+                    all_pairs.append((first, second))
+        
+        # Randomly sample n_trigrams pairs
+        selected_indices = torch.randperm(len(all_pairs))[:n_trigrams]
+        
+        self.trigrams = {}  # (first_token, second_token) -> target_token
+        
+        for i in range(n_trigrams):
+            pair_idx = selected_indices[i].item()
+            first_token, second_token = all_pairs[pair_idx]
+            
+            # Target can be any token in vocab
+            target_token = torch.randint(0, vocab_size, (1,)).item()
+            
+            self.trigrams[(first_token, second_token)] = target_token
+        
+        # All tokens can serve as noise
+        self.noise_tokens = list(range(vocab_size))
+        
+        print(f"Generated {len(self.trigrams)} skip trigrams:")
+        for (first, second), target in self.trigrams.items():
+            print(f"  {first}, {second} -> {target}")
     
     def __len__(self) -> int:
-        return 2**31  # Infinite dataset like SparseFeatureDataset
+        return 2**31  # Infinite dataset
     
     def generate_batch(self, batch_size: int) -> Int[Tensor, "batch seq_len"]:
-        """Generate a batch of sequences, each containing exactly one skip trigram."""
+        """Generate a batch of sequences with skip trigrams.
         
-        batch = torch.randint(0, self.vocab_size, (batch_size, self.seq_len), device=self.device)
+        Structure:
+        - Positions 0 to seq_len-2: mix of trigram tokens and noise
+        - Position seq_len-1: target token for the trigram present in the sequence
+        """
         
-        if len(self.trigrams) > 0 and self.seq_len >= 4:
+        # Start with random noise tokens for all positions
+        if len(self.noise_tokens) == 0:
+            # If no noise tokens, use random tokens from vocab
+            batch = torch.randint(
+                low=0, 
+                high=self.vocab_size, 
+                size=(batch_size, self.seq_len), 
+                device=self.device
+            )
+        else:
+            batch = torch.randint(
+                low=0, 
+                high=len(self.noise_tokens), 
+                size=(batch_size, self.seq_len), 
+                device=self.device
+            )
+            # Map to actual noise token values
             for i in range(batch_size):
-                # Pick a random trigram for this sequence
-                trigram_idx = torch.randint(0, len(self.trigrams), (1,)).item()
-                trigger1, trigger2, target = self.trigrams[trigram_idx]
+                for j in range(self.seq_len):
+                    batch[i, j] = self.noise_tokens[batch[i, j].item()]
+        
+        # For each sequence, place one skip trigram
+        if len(self.trigrams) > 0:
+            for i in range(batch_size):
+                # Randomly select a skip trigram
+                trigram_keys = list(self.trigrams.keys())
+                selected_key = trigram_keys[torch.randint(0, len(trigram_keys), (1,)).item()]
+                first_token, second_token = selected_key
+                target_token = self.trigrams[selected_key]
                 
-                # Find a valid position for the pattern (trigger1, gap, trigger2, target)
-                # Need positions j, j+2, j+3 to be valid
-                max_start = self.seq_len - 4
-                if max_start >= 0:
-                    start_pos = torch.randint(0, max_start + 1, (1,)).item()
-                    
-                    # Insert the pattern: trigger1 at start_pos, trigger2 at start_pos+2, target at start_pos+3
-                    batch[i, start_pos] = trigger1
-                    batch[i, start_pos + 2] = trigger2  
-                    batch[i, start_pos + 3] = target
-                    
-                    # The position at start_pos+1 stays random (the "skip")
+                # Place first and second tokens at random positions (excluding last position)
+                available_positions = list(range(self.seq_len - 1))
+                selected_positions = torch.randperm(len(available_positions))[:2]
+                
+                first_pos = available_positions[selected_positions[0].item()]
+                second_pos = available_positions[selected_positions[1].item()]
+                
+                batch[i, first_pos] = first_token
+                batch[i, second_pos] = second_token
+                
+                # Set target at the last position
+                batch[i, -1] = target_token
         
         return batch
+    
+    def generate_batch_with_targets(self, batch_size: int) -> tuple[Int[Tensor, "batch seq_len"], Int[Tensor, "batch"]]:
+        """Generate a batch of sequences along with their target tokens."""
+        
+        # Generate the batch
+        batch = self.generate_batch(batch_size)
+        
+        # Extract targets (which are the last tokens)
+        targets = batch[:, -1].clone()
+        
+        return batch, targets
     
     def __getitem__(self, idx: int) -> Int[Tensor, "seq_len"]:
         """Generate a single sequence (for compatibility, but we mainly use generate_batch)."""

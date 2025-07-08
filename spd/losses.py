@@ -11,6 +11,7 @@ from spd.configs import Config
 from spd.models.component_model import ComponentModel
 from spd.models.component_utils import calc_stochastic_masks
 from spd.models.components import EmbeddingComponent, LinearComponent, AttentionComponent
+from spd.models.base_components import BaseAttentionModule
 from spd.utils import calc_kl_divergence_lm
 
 
@@ -140,14 +141,16 @@ def calc_masked_recon_layerwise_loss(
                 components={component_name: component},
                 masks={component_name: mask_info[component_name]},
             )
+            if torch.isnan(modified_out).any():
+                print("NaN in modified_out!")
             if loss_type == "mse":
                 loss = ((modified_out - target_out) ** 2).mean()
             elif loss_type == "kl":
-                loss = calc_kl_divergence_lm(pred=modified_out, target=target_out, pre_softmax=False)
+                loss = calc_kl_divergence_lm(pred=modified_out, target=target_out, attn=False)
             elif loss_type == "attn":
                 if not component.is_attention_module:
                     raise ValueError(f"Component {component_name} is not an attention module.")
-                loss = calc_kl_divergence_lm(pred, modified_out, target=target_out, pre_softmax=True)
+                loss = calc_kl_divergence_lm(pred = modified_out, target=target_out, attn=True)
             else:
                 raise ValueError(f"Invalid loss type: {loss_type}")
             total_loss += loss
@@ -169,11 +172,9 @@ def calc_masked_recon_loss(
     if loss_type == "mse":
         loss = ((out - target_out) ** 2).mean()
     elif loss_type == "kl":
-        loss = calc_kl_divergence_lm(pred=out, target=target_out)
+        loss = calc_kl_divergence_lm(pred=out, target=target_out, attn = False)
     elif loss_type == "attn":
-        if not component.is_attention_module:
-            raise ValueError(f"Component {component_name} is not an attention module.")
-        loss = calc_kl_divergence_lm(pred, modified_out, target=target_out, pre_softmax=True)
+        loss = calc_kl_divergence_lm(pred = out, target=target_out, attn=True)
     else:
         raise ValueError(f"Invalid loss type: {loss_type}")
     return loss
@@ -214,7 +215,7 @@ def calc_faithfulness_loss(
     for comp_name, component in components.items():
         component_params[comp_name] = component.weight
         submodule = target_model.get_submodule(comp_name)
-        assert isinstance(submodule, nn.Linear | nn.Embedding)
+        assert isinstance(submodule, nn.Linear | nn.Embedding | BaseAttentionModule)
         target_params[comp_name] = submodule.weight
         assert component_params[comp_name].shape == target_params[comp_name].shape
 
@@ -343,6 +344,7 @@ def calculate_losses(
         stochastic_masks = calc_stochastic_masks(
             causal_importances=causal_importances, n_mask_samples=config.n_mask_samples
         )
+        
         stochastic_recon_loss = torch.tensor(0.0, device=target_out.device)
         for i in range(len(stochastic_masks)):
             stochastic_recon_loss += calc_masked_recon_loss(

@@ -82,7 +82,23 @@ def optimize(
         n_ci_mlp_neurons=config.n_ci_mlp_neurons,
         pretrained_model_output_attr=config.pretrained_model_output_attr,
     )
-
+    print("\n=== SPD DECOMPOSITION DEBUG ===")
+    print(f"Target module patterns: {config.target_module_patterns}")
+    print(f"Components created: {list(model.components.keys())}")
+    print(f"State Dict Keys: {list(model.state_dict().keys())}")
+    # Show which original modules are being replaced
+    print("\nOriginal modules in target model:")
+    for name, module in target_model.named_modules():
+        if hasattr(module, 'weight') or hasattr(module, 'is_attention_module'):
+            print(f"  {name}: {type(module).__name__}")
+    
+    print("\nComponents replacing modules:")
+    for comp_name, component in model.components.items():
+        print(f"  {comp_name}: {type(component).__name__}")
+        print(f"    A shape: {component.A.shape}")
+        print(f"    B shape: {component.B.shape}")
+    
+    print("=== END DEBUG ===\n")
     for param in target_model.parameters():
         param.requires_grad = False
     logger.info("Target model parameters frozen.")
@@ -151,10 +167,10 @@ def optimize(
             batch_item = next(data_iter)
             batch = extract_batch_data(batch_item)
         batch = batch.to(device)
-
         target_out, pre_weight_acts = model.forward_with_pre_forward_cache_hooks(
             batch, module_names=list(components.keys())
         )
+        
         As = {module_name: components[module_name].A for module_name in components}
 
         causal_importances, causal_importances_upper_leaky = calc_causal_importances(
@@ -192,7 +208,6 @@ def optimize(
                     for layer_name, layer_alive_components in alive_components.items():
                         log_data[f"{layer_name}/n_alive_01"] = layer_alive_components.sum().item()
                         alive_components[layer_name] = torch.zeros(config.C, device=device).bool()
-
                 # Calculate component logits and KL losses
                 masked_component_logits = model.forward_with_components(
                     batch, components=components, masks=causal_importances
@@ -202,19 +217,21 @@ def optimize(
                 )
 
                 target_logits = model(batch)
+  
+                
                 if config.output_loss_type == "attn":
                     log_data["misc/unmasked_kl_loss_vs_target"] = calc_kl_divergence_lm(
-                        pred=unmasked_component_logits, target=target_logits, pre_softmax=True
+                        pred=unmasked_component_logits, target=target_logits, attn=True
                     ).item()
                     log_data["misc/masked_kl_loss_vs_target"] = calc_kl_divergence_lm(
-                        pred=masked_component_logits, target=target_logits, pre_softmax=True
+                        pred=masked_component_logits, target=target_logits, attn=True
                     ).item()
                 else:
                     log_data["misc/unmasked_kl_loss_vs_target"] = calc_kl_divergence_lm(
-                        pred=unmasked_component_logits, target=target_logits, pre_softmax=False
+                        pred=unmasked_component_logits, target=target_logits, attn=False
                     ).item()
                     log_data["misc/masked_kl_loss_vs_target"] = calc_kl_divergence_lm(
-                        pred=masked_component_logits, target=target_logits, pre_softmax=False
+                        pred=masked_component_logits, target=target_logits, attn=False
                     ).item()
                 if config.log_ce_losses:
                     ce_losses = calc_ce_losses(
@@ -284,6 +301,9 @@ def optimize(
             or step == config.steps
         ) and out_dir is not None:
             torch.save(model.state_dict(), out_dir / f"model_{step}.pth")
+            print(f"SAVED MODEL TO {out_dir / f'model_{step}.pth'}")
+            print(f"State Dict Keys: {list(model.state_dict().keys())}")
+
             logger.info(f"Saved model, optimizer, and out_dir to {out_dir}")
             if config.wandb_project:
                 wandb.save(str(out_dir / f"model_{step}.pth"), base_path=str(out_dir), policy="now")

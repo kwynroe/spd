@@ -1,6 +1,7 @@
 """Config classes of various types"""
 
-from typing import Any, ClassVar, Literal, Self
+from typing import Any, ClassVar, Literal
+from typing_extensions import Self
 
 from pydantic import (
     BaseModel,
@@ -82,10 +83,32 @@ class LMTaskConfig(BaseModel):
         description="Name of the dataset split used for evaluation",
     )
 
+class AttentionTaskConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    task_name: Literal["attention"] = Field(
+        default="attention",
+        description="Task identifier for attention experiments",
+    )
+    vocab_size: int = Field(
+        ...,
+        description="Vocabulary size for the attention model",
+    )
+    seq_len: int = Field(
+        ...,
+        description="Sequence length for the attention model",
+    )
+    n_trigrams: int = Field(
+        default=20,
+        description="Number of trigrams to generate for training",
+    )
 
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     # --- WandB
+    wandb_entity: str | None = Field(
+        default=None,
+        description="Weights & Biases entity name (set to None to disable WandB logging)",
+    )
     wandb_project: str | None = Field(
         default=None,
         description="Weights & Biases project name (set to None to disable WandB logging)",
@@ -239,7 +262,7 @@ class Config(BaseModel):
     )
 
     # --- Task Specific ---
-    task_config: TMSTaskConfig | ResidualMLPTaskConfig | LMTaskConfig = Field(
+    task_config: TMSTaskConfig | ResidualMLPTaskConfig | LMTaskConfig | AttentionTaskConfig = Field(
         ...,
         discriminator="task_name",
         description="Nested task-specific configuration selected by the `task_name` discriminator",
